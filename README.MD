@@ -1,4 +1,5 @@
-Análise de Sentimento com Pipeline ETL
+## Análise de Sentimento com Pipeline ETL ##
+
 MVP educacional que demonstra um pipeline de dados de ponta a ponta: ingestão de arquivos .bz2, ETL com SQLite (SOR, SOT, SPEC) e treinamento de um modelo de análise de sentimento. A interface interativa é construída com Streamlit.
 
 📖 Documentação

@@ -152,10 +152,12 @@ def run_training_pipeline(df_train_raw, test_size_split, progress_bar, model_pat
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_split, random_state=42, stratify=y)
     
     progress_bar.progress(60, text="Treinando o modelo de classificação... (Isso PODE DEMORAR VÁRIOS MINUTOS)")
+    # --- ALTERAÇÃO FEITA AQUI: ADICIONADO ngram_range=(1, 2) PARA INCLUIR BIGRAMAS ---
     nlp_pipeline = Pipeline([
-        ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english')),
+        ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english', ngram_range=(1, 2))),
         ('clf', LogisticRegression(max_iter=1000, random_state=42))
     ])
+    # -------------------------------------------------------------------------------
     nlp_pipeline.fit(X_train, y_train)
     
     # Etapa 3: Avaliação e Salvamento
@@ -199,16 +201,17 @@ def run_prediction_pipeline(df_test_raw, model_path_to_load):
 # ==============================================================================
 # (Nenhuma grande mudança aqui, apenas textos e títulos)
 
-def answer_from_metrics_adapted(question: str, task: str, metrics_dict, importances_df):
+def answer_from_metrics_adapted(question: str, metrics_dict, importances_df):
     q = (question or "").lower()
     if "importan" in q or "palavras" in q:
-        top = importances_df.head(5)["feature"].tolist()
-        return f"As palavras mais influentes para o modelo de {task} são: {', '.join(top)}."
+        top_positive = importances_df[importances_df['coeficiente'] > 0].head(5)["feature"].tolist()
+        top_negative = importances_df[importances_df['coeficiente'] < 0].head(5)["feature"].tolist()
+        return f"As 5 palavras mais influentes para um sentimento **positivo** são: {', '.join(top_positive)}. E para um sentimento **negativo**: {', '.join(top_negative)}."
     if "métric" in q or "acur" in q:
-        return f"A acurácia do modelo de {task} foi de {metrics_dict.get('Acurácia', 'N/A')}."
+        return f"A acurácia do modelo foi de {metrics_dict.get('Acurácia', 'N/A')}."
     if "pipeline" in q:
         return "O pipeline carrega os dados para uma tabela SOR, limpa e move para SOT e SPEC, e depois treina um modelo com TF-IDF e Regressão Logística."
-    return "Desculpe, não entendi. Pergunte sobre 'palavras importantes' ou 'métricas'."
+    return "Desculpe, não entendi. Pergunte sobre 'palavras importantes', 'métricas' ou 'pipeline'."
 
 st.set_page_config(page_title="Análise de Sentimento", layout="wide")
 
@@ -238,6 +241,7 @@ with st.sidebar:
             time.sleep(1)
             progress_bar.empty()
             st.success("Modelo treinado e salvo com sucesso!")
+            st.balloons()
             st.rerun()
 
     st.subheader("Fazer Previsões com Modelo Salvo")
@@ -262,7 +266,15 @@ with tab_train:
         st.metric("Acurácia", st.session_state.metrics["Acurácia"])
         st.dataframe(pd.DataFrame(st.session_state.metrics["Relatório de Classificação"]).transpose())
         st.subheader("Palavras Mais Influentes")
-        st.dataframe(st.session_state.importances.head(20))
+        # --- ALTERAÇÃO AQUI PARA MOSTRAR AS MAIS POSITIVAS E NEGATIVAS SEPARADAMENTE ---
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("Top 10 Palavras Positivas")
+            st.dataframe(st.session_state.importances[st.session_state.importances['coeficiente'] > 0].head(10))
+        with col2:
+            st.write("Top 10 Palavras Negativas")
+            st.dataframe(st.session_state.importances[st.session_state.importances['coeficiente'] < 0].head(10))
+        # -------------------------------------------------------------------------------
     else: st.info("Execute o treinamento para ver os resultados.")
 with tab_predict:
     st.header("Resultados da Previsão")
@@ -280,6 +292,6 @@ with tab_chat:
         for msg in st.session_state.chat_messages: st.chat_message(msg["role"]).write(msg["content"])
         if prompt := st.chat_input():
             st.session_state.chat_messages.append({"role": "user", "content": prompt})
-            response = answer_from_metrics_adapted("Análise de Sentimento", st.session_state.metrics, st.session_state.importances)
-            st.session_state.chat_messages.append({"role": "assistant", "content": response})
-            st.rerun()
+            response = answer_from_metrics_adapted(prompt, st.session_state.metrics, st.session_state.importances)
+            st.chat_message("assistant").write(response)
+            # st.rerun() # Removido para não duplicar mensagens no chat
