@@ -1,68 +1,54 @@
-# ANÁLISE DE SENTIMENTO COM PIPELINE ETL
+# 🤖 Dashboard de Análise de Reclamações de Produtos Eletrônicos
 
-MVP educacional que demonstra um pipeline de dados de ponta a ponta: ingestão de arquivos .bz2, ETL com SQLite (SOR, SOT, SPEC) e treinamento de um modelo de análise de sentimento. A interface interativa é construída com Streamlit.
+## 📝 Descrição do Projeto
 
-## 📖 Documentação
+Este projeto é uma aplicação web interativa construída com Streamlit que realiza uma análise de ponta a ponta das avaliações de produtos eletrônicos da Amazon. O objetivo principal é identificar quais produtos recebem mais reclamações e entender os principais motivos por trás da insatisfação dos clientes, analisando também a evolução desses sentimentos ao longo do tempo.
 
-A documentação completa do projeto, incluindo o Project Model Canvas (PMC), a Arquitetura de Software e o Modelo de Dados, foi desenvolvida para guiar a implementação.
+## ✨ Funcionalidades
 
-## 🖥️ Como rodar o projeto no Visual Studio Code
+* **Pipeline de ETL Robusto:** Utiliza um banco de dados SQLite para extrair, transformar e carregar os dados, garantindo um fluxo organizado desde os dados brutos até a versão pronta para modelagem.
+* **Pré-processamento Avançado de NLP:** Aplica técnicas como remoção de stopwords e lematização para melhorar a qualidade do texto.
+* **Classificação de Reclamações:** Um modelo de Regressão Logística treinado para classificar avaliações como "Reclamação" ou "Não Reclamação" com alta acurácia.
+* **Modelagem de Tópicos (LDA):** Identifica e agrupa os principais motivos de reclamação (ex: problemas de bateria, defeitos de tela, conectividade).
+* **Análise Temporal:** Visualiza a evolução do número de reclamações ao longo do tempo, tanto de forma geral quanto para produtos específicos.
+* **Dashboard Interativo:** Uma interface amigável com gráficos e tabelas (criados com Plotly) que permite explorar os insights de forma dinâmica.
 
-### 1. Pré-requisitos
+## 🚀 Como Executar
 
-**Python 3.8 ou superior.**
+1.  **Clone o repositório:**
+    ```bash
+    git clone [URL-do-seu-repositorio]
+    cd [nome-do-repositorio]
+    ```
 
-**Os arquivos de dados train.ft.txt.bz2 e test.ft.txt.bz2 devem estar na mesma pasta do projeto.**
+2.  **Crie um ambiente virtual (recomendado):**
+    ```bash
+    python -m venv venv
+    source venv/bin/activate  # No Windows: venv\Scripts\activate
+    ```
 
-### 2. Abrir o projeto
+3.  **Instale as dependências:**
+    Certifique-se de que o arquivo `requirements.txt` está na pasta e execute:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-Abra o VS Code, vá em File → Open Folder e escolha a pasta onde você salvou o projeto.
+4.  **Baixe os dados do NLTK:**
+    Execute o script `setup_nltk.py` uma única vez para baixar os pacotes necessários:
+    ```bash
+    python setup_nltk.py
+    ```
 
-### 3. Criar e ativar ambiente virtual
+5.  **Execute a aplicação Streamlit:**
+    ```bash
+    streamlit run app_sentimento.py
+    ```
 
-No terminal integrado do VS Code (Ctrl+ ou View -> Terminal):
+## 🏛️ Arquitetura
 
-```bash
-# Criar o ambiente virtual
-python -m venv .venv
-
-# Ativar no Linux/Mac
-source .venv/bin/activate
-
-# Ativar no Windows (PowerShell)
-.venv\Scripts\Activate.ps1
-```
-⚠️ No canto inferior direito do VS Code, clique na versão do Python e selecione o interpretador que contém .venv no caminho.
-
-### 4. Instalar dependências
-Depois, com o ambiente virtual ativo, instale as dependências:
-```bash
-pip install -r requirements.txt
-```
-
-### 5. Rodar a aplicação Streamlit
-No terminal do VS Code, execute o comando:
-```bash
-streamlit run app_sentimento.py
-```
-A aplicação abrirá automaticamente no seu navegador no endereço http://localhost:8501.
-
-## 📂 Estrutura de pastas
-
-**A estrutura deste projeto foi simplificada para focar no pipeline dentro de um único script.**
-
-```
-analise-sentimento-mvp/
-├─ app_sentimento.py          # Script principal com a UI e toda a lógica
-├─ train.ft.txt.bz2           # Dados brutos de treino (colocar aqui)
-├─ test.ft.txt.bz2            # Dados brutos de teste (colocar aqui)
-├─ requirements.txt           # Dependências do projeto
-├─ amazon_reviews.db          # (Será criado após o 1º treino)
-├─ model_sentiment/           # (Será criada após o 1º treino)
-│  └─ sentiment_classifier.pickle
-└─ README.md                  # Este arquivo
-```
-
-## 🚀 Deploy
-
-Para publicar a aplicação, você pode usar o Streamlit Community Cloud. O processo geralmente envolve conectar sua conta do GitHub e apontar para o repositório do projeto.
+O projeto segue uma arquitetura modularizada, separando as responsabilidades em:
+1.  **Leitura e Carregamento de Dados:** Leitura do CSV e amostragem.
+2.  **Pipeline de ETL:** Gerenciamento do fluxo de dados com SQLite (SOR, SOT, SPEC).
+3.  **Pré-processamento de NLP:** Funções dedicadas à limpeza e preparação do texto.
+4.  **Pipelines de Machine Learning:** Funções para treinamento do classificador e modelagem de tópicos.
+5.  **Interface do Usuário (UI):** Dashboard construído com Streamlit para visualização e interatividade.

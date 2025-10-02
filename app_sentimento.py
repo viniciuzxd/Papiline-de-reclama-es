@@ -1,297 +1,349 @@
 import streamlit as st
 import pandas as pd
-import bz2
 import os
 import pickle
 import time
 import numpy as np
 import sqlite3
+import plotly.express as px
+import re
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk.tokenize import word_tokenize
 
+# --- IMPORTAÇÕES DO SCIKIT-LEARN QUE ESTAVAM FALTANDO ---
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, classification_report
+from sklearn.decomposition import LatentDirichletAllocation
+# ---------------------------------------------------------
+
+
+# --- Bloco de configuração do NLTK (executa uma vez) ---
+# É seguro deixar aqui, o Streamlit gerencia o cache.
+try:
+    stopwords.words('english')
+except LookupError:
+    # Se der erro aqui, lembre-se de rodar o script setup_nltk.py primeiro
+    nltk.download('punkt')
+    nltk.download('wordnet')
+    nltk.download('stopwords')
+# ---------------------------------------------------------
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES GERAIS
+# 0. CONFIGURAÇÕES GERAIS (Atualizado para sua estrutura)
 # ==============================================================================
-# Nomes dos arquivos de dados locais
-TRAIN_FILE_PATH = "train.ft.txt.bz2"
-TEST_FILE_PATH = "test.ft.txt.bz2"
+# ATENÇÃO: Adicione o arquivo 'Electronics.csv' baixado do Kaggle a esta pasta.
+# O código vai procurar por este nome. Os arquivos 'train.ft.txt.bz2' não serão mais usados.
+DATA_FILE_PATH = "Electronics.csv"
 
-# Configurações do Banco de Dados
-DB_NAME = "amazon_reviews.db"
+# Um novo banco de dados será criado com este nome
+DB_NAME = "electronics_reviews_v2.db"
 SOR_TABLE = "sor_reviews"
 SOT_TABLE = "sot_reviews"
 SPEC_TABLE_TRAIN = "spec_reviews_train"
-SPEC_TABLE_PREDICT = "spec_reviews_predict"
 
-# Diretório para salvar o modelo
-MODEL_DIR = "model_sentiment"
+# Um novo diretório chamado 'model_complaint_v2' será criado para salvar o novo modelo,
+# para não confundir com sua pasta 'model_sentiment' antiga.
+MODEL_DIR = "model_complaint_v2"
 if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
-MODEL_PATH = os.path.join(MODEL_DIR, "sentiment_classifier.pickle")
+MODEL_PATH = os.path.join(MODEL_DIR, "complaint_classifier_v2.pickle")
+
+# Configurações para Modelagem de Tópicos
+N_TOPICS = 5
 
 # ==============================================================================
-# 1. MÓDULO DE BANCO DE DADOS (Adaptado para Análise de Sentimento)
+# 1. MÓDULO DE PRÉ-PROCESSAMENTO DE TEXTO
 # ==============================================================================
+def preprocess_text(text):
+    """Aplica uma limpeza completa no texto: minúsculas, remove pontuação/números,
+    remove stopwords e aplica lematização."""
+    if not isinstance(text, str):
+        return ""
+    
+    lemmatizer = WordNetLemmatizer()
+    stop_words = set(stopwords.words('english'))
+    
+    text = text.lower()
+    text = re.sub(r'[^a-z\s]', '', text)
+    tokens = word_tokenize(text)
+    
+    lemmatized_tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words and len(word) > 2]
+    
+    return " ".join(lemmatized_tokens)
 
+# ==============================================================================
+# 2. MÓDULO DE BANCO DE DADOS
+# ==============================================================================
 def connect_db():
-    """Cria uma conexão com o banco de dados SQLite."""
     return sqlite3.connect(DB_NAME)
 
 def create_database_and_tables():
-    """Cria o DB e as tabelas SOR, SOT e SPEC se não existirem."""
     if os.path.exists(DB_NAME):
-        os.remove(DB_NAME) # Remove o DB antigo para começar do zero
+        os.remove(DB_NAME)
     
     conn = connect_db()
     cursor = conn.cursor()
-    # Tabela SOR: Armazena dados brutos
-    cursor.execute(f"CREATE TABLE {SOR_TABLE} (label INTEGER, text TEXT)")
-    # Tabela SOT: Armazena dados limpos/transformados
-    cursor.execute(f"CREATE TABLE {SOT_TABLE} (label INTEGER, text_cleaned TEXT)")
-    # Tabela SPEC: Dados prontos para o modelo
-    cursor.execute(f"CREATE TABLE {SPEC_TABLE_TRAIN} (label INTEGER, text_cleaned TEXT)")
-    cursor.execute(f"CREATE TABLE {SPEC_TABLE_PREDICT} (text_cleaned TEXT, original_text TEXT)")
-    
+    cursor.execute(f"""
+        CREATE TABLE {SOR_TABLE} (
+            asin TEXT, 
+            overall INTEGER, 
+            reviewText TEXT,
+            reviewTime TEXT
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE {SOT_TABLE} (
+            asin TEXT, 
+            is_complaint INTEGER, 
+            text_processed TEXT,
+            review_date DATE
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE {SPEC_TABLE_TRAIN} (
+            asin TEXT, 
+            is_complaint INTEGER, 
+            text_processed TEXT,
+            review_date DATE
+        )
+    """)
     conn.commit()
     conn.close()
 
-def insert_df_to_sor(df):
-    """Insere os dados de um DataFrame na tabela SOR."""
+def run_etl_pipeline(df_raw, progress_bar):
     conn = connect_db()
-    df.to_sql(SOR_TABLE, conn, if_exists="replace", index=False)
-    conn.close()
-
-def run_etl_sor_to_sot():
-    """Lê da SOR, aplica uma transformação simples (lowercase) e salva na SOT."""
-    conn = connect_db()
+    df_raw.to_sql(SOR_TABLE, conn, if_exists="replace", index=False)
+    
     df_sor = pd.read_sql_query(f"SELECT * FROM {SOR_TABLE}", conn)
     
-    # Lógica de Transformação (simples para demonstrar o conceito)
     df_sot = pd.DataFrame()
-    df_sot['label'] = df_sor['label']
-    df_sot['text_cleaned'] = df_sor['text'].str.lower() # Ex: deixar tudo minúsculo
+    df_sot['asin'] = df_sor['asin']
+    
+    progress_bar.progress(30, text="ETL: Aplicando pré-processamento avançado no texto...")
+    df_sot['text_processed'] = df_sor['reviewText'].apply(preprocess_text)
+    
+    df_sot['is_complaint'] = df_sor['overall'].apply(lambda x: 1 if x <= 2 else 0)
+    df_sot['review_date'] = pd.to_datetime(df_sor['reviewTime'])
     
     df_sot.to_sql(SOT_TABLE, conn, if_exists="replace", index=False)
-    conn.close()
-
-def run_etl_sot_to_spec_train():
-    """Copia dados da SOT para a SPEC de treino."""
-    conn = connect_db()
-    df_sot = pd.read_sql_query(f"SELECT * FROM {SOT_TABLE}", conn)
-    df_sot.to_sql(SPEC_TABLE_TRAIN, conn, if_exists="replace", index=False)
-    conn.close()
-
-def run_etl_for_test_data(df_test):
-    """Executa um ETL simplificado para os dados de teste e salva na SPEC de previsão."""
-    conn = connect_db()
-    df_spec = pd.DataFrame()
-    df_spec['original_text'] = df_test['text']
-    df_spec['text_cleaned'] = df_test['text'].str.lower()
-    df_spec.to_sql(SPEC_TABLE_PREDICT, conn, if_exists="replace", index=False)
+    
+    df_spec = pd.read_sql_query(f"SELECT * FROM {SOT_TABLE}", conn)
+    df_spec.to_sql(SPEC_TABLE_TRAIN, conn, if_exists="replace", index=False)
     conn.close()
 
 def load_data_from_db(table_name: str):
-    """Carrega dados de uma tabela específica do banco de dados."""
     conn = connect_db()
     df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
     conn.close()
     return df
 
 # ==============================================================================
-# 2. MÓDULO DE LEITURA DE ARQUIVO
+# 3. MÓDULO DE LEITURA DE ARQUIVO
 # ==============================================================================
-# (A função de leitura do arquivo .bz2 permanece a mesma)
 @st.cache_data
-def load_amazon_reviews_from_local_bz2(file_path):
+def load_electronics_reviews_from_csv(file_path, sample_size=None):
     if not os.path.exists(file_path):
-        st.error(f"Arquivo não encontrado: '{file_path}'. Certifique-se de que ele está na mesma pasta que o script.")
+        st.error(f"Arquivo não encontrado: '{file_path}'. Certifique-se de que 'Electronics.csv' está na pasta.")
         return None
-    labels, texts = [], []
-    with st.spinner(f"Carregando e processando '{file_path}'... Isso pode levar alguns minutos."):
-        with bz2.open(file_path, 'rt', encoding='utf-8') as file:
-            for line in file:
-                first_space_index = line.find(' ')
-                if first_space_index != -1:
-                    labels.append(int(line[:first_space_index].replace('__label__', '')))
-                    texts.append(line[first_space_index + 1:].strip())
-    st.success(f"Arquivo '{file_path}' carregado com sucesso!")
-    return pd.DataFrame({'label': labels, 'text': texts})
+    
+    with st.spinner(f"Carregando e processando '{file_path}'..."):
+        try:
+            # ATENÇÃO: Verifique se 'reviewTime' é o nome correto da coluna no seu CSV!
+            df = pd.read_csv(file_path, usecols=['asin', 'overall', 'reviewText', 'reviewTime'])
+            df.dropna(subset=['reviewText', 'asin', 'reviewTime'], inplace=True)
+            df = df[df['overall'] != 3]
+            
+            if sample_size and sample_size < len(df):
+                df = df.sample(n=sample_size, random_state=42)
 
+            st.success(f"Arquivo '{file_path}' carregado! {len(df)} linhas serão analisadas.")
+            return df
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo CSV: {e}. Verifique o nome das colunas.")
+            return None
 
 # ==============================================================================
-# 3. MÓDULO DO PIPELINE (Agora integrando o DB)
+# 4. MÓDULO DO PIPELINE DE MACHINE LEARNING
 # ==============================================================================
-
-def run_training_pipeline(df_train_raw, test_size_split, progress_bar, model_path_to_save):
-    # Etapa 1: ETL com Banco de Dados (45%)
-    progress_bar.progress(10, text="Criando banco de dados e tabelas (SOR, SOT, SPEC)...")
-    create_database_and_tables()
-    time.sleep(1)
-    
-    progress_bar.progress(20, text="Inserindo dados brutos na tabela SOR...")
-    insert_df_to_sor(df_train_raw)
-    time.sleep(1)
-
-    progress_bar.progress(30, text="Executando ETL: SOR -> SOT (limpeza)...")
-    run_etl_sor_to_sot()
-    time.sleep(1)
-
-    progress_bar.progress(45, text="Executando ETL: SOT -> SPEC (preparação final)...")
-    run_etl_sot_to_spec_train()
-    time.sleep(1)
-
-    # Etapa 2: Treinamento do Modelo (a partir da SPEC)
-    progress_bar.progress(50, text="Carregando dados da tabela SPEC para treinamento...")
-    df_spec = load_data_from_db(SPEC_TABLE_TRAIN)
-    
-    y = df_spec["label"]
-    X = df_spec['text_cleaned']
+def run_complaint_classifier_pipeline(df_spec, test_size_split):
+    y = df_spec["is_complaint"]
+    X = df_spec['text_processed']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_split, random_state=42, stratify=y)
     
-    progress_bar.progress(60, text="Treinando o modelo de classificação... (Isso PODE DEMORAR VÁRIOS MINUTOS)")
-    # --- ALTERAÇÃO FEITA AQUI: ADICIONADO ngram_range=(1, 2) PARA INCLUIR BIGRAMAS ---
     nlp_pipeline = Pipeline([
         ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english', ngram_range=(1, 2))),
         ('clf', LogisticRegression(max_iter=1000, random_state=42))
     ])
-    # -------------------------------------------------------------------------------
     nlp_pipeline.fit(X_train, y_train)
     
-    # Etapa 3: Avaliação e Salvamento
-    progress_bar.progress(80, text="Avaliando modelo e extraindo palavras importantes...")
     y_pred = nlp_pipeline.predict(X_test)
     accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred, target_names=['Negativo (1)', 'Positivo (2)'], output_dict=True)
+    report = classification_report(y_test, y_pred, target_names=['Não Reclamação', 'Reclamação'], output_dict=True)
     metrics = {"Acurácia": f"{accuracy:.2%}", "Relatório de Classificação": report}
 
-    vectorizer = nlp_pipeline.named_steps['tfidf']
-    classifier = nlp_pipeline.named_steps['clf']
+    with open(MODEL_PATH, "wb") as f: pickle.dump(nlp_pipeline, f)
+    return metrics
+
+def run_topic_modeling_pipeline(complaint_texts, n_topics):
+    vectorizer = TfidfVectorizer(max_df=0.95, min_df=2, max_features=1000, stop_words='english')
+    X = vectorizer.fit_transform(complaint_texts)
+    
+    lda = LatentDirichletAllocation(n_components=n_topics, random_state=42)
+    lda.fit(X)
+    
     feature_names = vectorizer.get_feature_names_out()
-    coefs = classifier.coef_[0]
-    importances_df = pd.DataFrame({'feature': feature_names, 'coeficiente': coefs, 'abs_coeficiente': np.abs(coefs)}).sort_values('abs_coeficiente', ascending=False).drop(columns='abs_coeficiente')
-
-    with open(model_path_to_save, "wb") as f:
-        pickle.dump(nlp_pipeline, f)
-    progress_bar.progress(90, text="Modelo salvo e métricas calculadas.")
+    topics = {}
+    topic_names = {
+        0: "Bateria e Energia", 1: "Qualidade/Defeito do Produto", 2: "Conectividade e Software",
+        3: "Componentes (tela, cabo)", 4: "Uso Geral e Expectativa"
+    }
+    for topic_idx, topic in enumerate(lda.components_):
+        top_words = [feature_names[i] for i in topic.argsort()[:-10 - 1:-1]]
+        topic_name = topic_names.get(topic_idx, f"Motivo {topic_idx + 1}")
+        topics[topic_name] = ", ".join(top_words)
+        
+    topic_distribution = lda.transform(X)
+    dominant_topic_idx = np.argmax(topic_distribution, axis=1)
+    dominant_topic_name = [topic_names.get(i, f"Motivo {i+1}") for i in dominant_topic_idx]
     
-    return metrics, importances_df
-
-def run_prediction_pipeline(df_test_raw, model_path_to_load):
-    # Executa ETL para os dados de teste
-    run_etl_for_test_data(df_test_raw)
-    df_spec_predict = load_data_from_db(SPEC_TABLE_PREDICT)
-
-    with open(model_path_to_load, 'rb') as f:
-        model = pickle.load(f)
-    
-    # Faz predição nos dados limpos da tabela SPEC
-    predictions = model.predict(df_spec_predict['text_cleaned'])
-    
-    result_df = pd.DataFrame()
-    result_df['texto_original'] = df_spec_predict['original_text']
-    result_df['sentimento_previsto'] = ["Positivo" if p == 2 else "Negativo" for p in predictions]
-    
-    return result_df
+    return topics, dominant_topic_name
 
 # ==============================================================================
-# 4. MÓDULO DO CHATBOT E UI STREAMLIT
+# 5. MÓDULO UI STREAMLIT
 # ==============================================================================
-# (Nenhuma grande mudança aqui, apenas textos e títulos)
+st.set_page_config(page_title="Análise de Reclamações", layout="wide")
+st.sidebar.title("Configurações da Análise")
 
-def answer_from_metrics_adapted(question: str, metrics_dict, importances_df):
-    q = (question or "").lower()
-    if "importan" in q or "palavras" in q:
-        top_positive = importances_df[importances_df['coeficiente'] > 0].head(5)["feature"].tolist()
-        top_negative = importances_df[importances_df['coeficiente'] < 0].head(5)["feature"].tolist()
-        return f"As 5 palavras mais influentes para um sentimento **positivo** são: {', '.join(top_positive)}. E para um sentimento **negativo**: {', '.join(top_negative)}."
-    if "métric" in q or "acur" in q:
-        return f"A acurácia do modelo foi de {metrics_dict.get('Acurácia', 'N/A')}."
-    if "pipeline" in q:
-        return "O pipeline carrega os dados para uma tabela SOR, limpa e move para SOT e SPEC, e depois treina um modelo com TF-IDF e Regressão Logística."
-    return "Desculpe, não entendi. Pergunte sobre 'palavras importantes', 'métricas' ou 'pipeline'."
-
-st.set_page_config(page_title="Análise de Sentimento", layout="wide")
-
-if "model_trained" not in st.session_state: st.session_state.model_trained = False
-if "predictions_made" not in st.session_state: st.session_state.predictions_made = False
-if "prediction_df" not in st.session_state: st.session_state.prediction_df = None
-if "metrics" not in st.session_state: st.session_state.metrics = None
-if "importances" not in st.session_state: st.session_state.importances = None
-
-st.sidebar.title("Configurações do Pipeline")
 with st.sidebar:
-    st.header("1. Arquivos de Dados")
-    st.info(f"O modelo usará os arquivos locais:\n- **Treino:** `{TRAIN_FILE_PATH}`\n- **Teste:** `{TEST_FILE_PATH}`")
-    st.warning("Certifique-se de que os arquivos estão na mesma pasta que este script.")
-    st.header("2. Ações do Pipeline")
-    st.subheader("Treinar Novo Modelo")
-    test_size = st.slider("Tamanho do conjunto de validação", 0.1, 0.4, 0.2, 0.05)
+    st.header("1. Dados de Entrada")
+    st.info(f"O modelo usará o arquivo: `{DATA_FILE_PATH}`")
+    sample_size = st.slider("Nº de avaliações para analisar (amostra)", 5000, 100000, 20000, 5000)
     
-    if st.button("Executar Treinamento com ETL"):
-        df_train_raw = load_amazon_reviews_from_local_bz2(TRAIN_FILE_PATH)
-        if df_train_raw is not None:
-            progress_bar = st.progress(0, text="Iniciando pipeline de ETL e treinamento...")
-            metrics, importances = run_training_pipeline(df_train_raw, test_size, progress_bar, MODEL_PATH)
-            st.session_state.metrics, st.session_state.importances = metrics, importances
-            st.session_state.model_trained, st.session_state.predictions_made = True, False
-            progress_bar.progress(100, text="Pipeline concluído!")
+    st.header("2. Ações do Pipeline")
+    test_size = st.slider("Tamanho do conjunto de validação (%)", 0.1, 0.4, 0.2, 0.05)
+    
+    if st.button("🚀 Executar Análise Completa"):
+        st.session_state.clear()
+        df_raw = load_electronics_reviews_from_csv(DATA_FILE_PATH, sample_size)
+        
+        if df_raw is not None:
+            progress_bar = st.progress(0, text="Iniciando pipeline...")
+            
+            progress_bar.progress(10, text="ETL: Criando banco de dados...")
+            create_database_and_tables()
             time.sleep(1)
+            
+            run_etl_pipeline(df_raw, progress_bar)
+            
+            progress_bar.progress(40, text="Carregando dados da tabela SPEC...")
+            df_spec = load_data_from_db(SPEC_TABLE_TRAIN)
+            df_spec['review_date'] = pd.to_datetime(df_spec['review_date'])
+            st.session_state.df_spec = df_spec
+            
+            progress_bar.progress(50, text="Treinando modelo de classificação...")
+            metrics = run_complaint_classifier_pipeline(df_spec, test_size)
+            st.session_state.classifier_metrics = metrics
+            
+            progress_bar.progress(75, text="Analisando os motivos das reclamações (LDA)...")
+            df_complaints = df_spec[df_spec['is_complaint'] == 1].copy()
+            if not df_complaints.empty:
+                topics, dominant_topic = run_topic_modeling_pipeline(df_complaints['text_processed'], N_TOPICS)
+                st.session_state.topics = topics
+                df_complaints['topic_name'] = dominant_topic
+                st.session_state.df_complaints_with_topics = df_complaints
+            
+            progress_bar.progress(100, text="Análise concluída!")
+            time.sleep(2)
             progress_bar.empty()
-            st.success("Modelo treinado e salvo com sucesso!")
-            st.balloons()
+            st.success("Pipeline executado com sucesso!")
             st.rerun()
 
-    st.subheader("Fazer Previsões com Modelo Salvo")
-    if st.button("Executar Previsão"):
-        if not os.path.exists(MODEL_PATH):
-            st.error("Nenhum modelo treinado foi encontrado! Treine um modelo primeiro.")
-        else:
-            df_test_raw = load_amazon_reviews_from_local_bz2(TEST_FILE_PATH)
-            if df_test_raw is not None:
-                with st.spinner("Carregando modelo e fazendo previsões..."):
-                    result_df = run_prediction_pipeline(df_test_raw, MODEL_PATH)
-                    st.session_state.prediction_df, st.session_state.predictions_made = result_df, True
-                st.success("Previsões geradas com sucesso!")
-                st.rerun()
+st.title("🤖 Dashboard de Análise de Reclamações de Produtos Eletrônicos")
 
-# --- Abas Principais ---
-st.title("🤖 Pipeline de Análise de Sentimento (com ETL e SQLite)")
-tab_train, tab_predict, tab_chat = st.tabs(["📊 Resultados do Treino", "🚀 Previsões", "💬 Chat com o Modelo"])
-with tab_train:
-    st.header("Métricas do Modelo de Classificação")
-    if st.session_state.metrics:
-        st.metric("Acurácia", st.session_state.metrics["Acurácia"])
-        st.dataframe(pd.DataFrame(st.session_state.metrics["Relatório de Classificação"]).transpose())
-        st.subheader("Palavras Mais Influentes")
-        # --- ALTERAÇÃO AQUI PARA MOSTRAR AS MAIS POSITIVAS E NEGATIVAS SEPARADAMENTE ---
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Top 10 Palavras Positivas")
-            st.dataframe(st.session_state.importances[st.session_state.importances['coeficiente'] > 0].head(10))
-        with col2:
-            st.write("Top 10 Palavras Negativas")
-            st.dataframe(st.session_state.importances[st.session_state.importances['coeficiente'] < 0].head(10))
-        # -------------------------------------------------------------------------------
-    else: st.info("Execute o treinamento para ver os resultados.")
-with tab_predict:
-    st.header("Resultados da Previsão")
-    if st.session_state.predictions_made:
-        st.dataframe(st.session_state.prediction_df)
-        csv_data = st.session_state.prediction_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download em CSV", csv_data, "sentiment_predictions.csv", "text/csv")
-    else: st.info("Execute uma previsão para ver os resultados.")
-with tab_chat:
-    st.header("Converse com o Assistente do Modelo")
-    if not st.session_state.model_trained:
-        st.info("Treine um modelo primeiro para poder conversar.")
-    else:
-        if "chat_messages" not in st.session_state: st.session_state.chat_messages = [{"role": "assistant", "content": "Olá! O modelo foi treinado. Sobre o que quer saber?"}]
-        for msg in st.session_state.chat_messages: st.chat_message(msg["role"]).write(msg["content"])
-        if prompt := st.chat_input():
-            st.session_state.chat_messages.append({"role": "user", "content": prompt})
-            response = answer_from_metrics_adapted(prompt, st.session_state.metrics, st.session_state.importances)
-            st.chat_message("assistant").write(response)
-            # st.rerun() # Removido para não duplicar mensagens no chat
+if 'df_spec' not in st.session_state:
+    st.info("👈 Configure e execute a análise na barra lateral para ver os resultados.")
+else:
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📊 Desempenho do Classificador", 
+        "🏆 Produtos com Mais Reclamações", 
+        "🔍 Análise de Motivos (O Porquê)",
+        "📈 Análise Temporal (NOVO!)"
+    ])
+
+    with tab1:
+        st.header("Métricas do Modelo de Classificação de Reclamações")
+        if 'classifier_metrics' in st.session_state:
+            metrics = st.session_state.classifier_metrics
+            st.metric("Acurácia", metrics["Acurácia"])
+            st.dataframe(pd.DataFrame(metrics["Relatório de Classificação"]).transpose())
+        else: st.warning("Métricas não disponíveis.")
+
+    with tab2:
+        st.header("Quais produtos recebem mais reclamações?")
+        if 'df_complaints_with_topics' in st.session_state:
+            df_complaints = st.session_state.df_complaints_with_topics
+            complaint_counts = df_complaints['asin'].value_counts().reset_index()
+            complaint_counts.columns = ['asin', 'count']
+            
+            top_n = st.slider("Selecione o número de produtos para exibir", 5, 50, 10, key='top_n_slider')
+            top_products = complaint_counts.head(top_n)
+
+            fig = px.bar(top_products, x='asin', y='count', title=f'Top {top_n} Produtos com Mais Reclamações', labels={'asin': 'ID do Produto (ASIN)', 'count': 'Número de Reclamações'})
+            fig.update_xaxes(type='category')
+            st.plotly_chart(fig, use_container_width=True)
+        else: st.info("Não há dados de reclamações para exibir.")
+
+    with tab3:
+        st.header("Por que os clientes estão reclamando?")
+        if 'topics' in st.session_state and 'df_complaints_with_topics' in st.session_state:
+            topics = st.session_state.topics
+            df_complaints = st.session_state.df_complaints_with_topics
+
+            st.subheader("Principais Motivos de Reclamação (Geral)")
+            st.table(pd.DataFrame.from_dict(topics, orient='index', columns=['Palavras-chave']))
+            
+            st.subheader("Análise por Produto Específico")
+            top_product_list = df_complaints['asin'].value_counts().head(20).index.tolist()
+            selected_product = st.selectbox("Selecione um produto para analisar:", top_product_list)
+
+            if selected_product:
+                product_complaints = df_complaints[df_complaints['asin'] == selected_product]
+                topic_counts = product_complaints['topic_name'].value_counts().reset_index()
+                fig = px.pie(topic_counts, names='topic_name', values='count', title=f"Motivos de Reclamação para o Produto: {selected_product}", hole=0.3)
+                st.plotly_chart(fig, use_container_width=True)
+        else: st.info("Não há dados de tópicos para exibir.")
+
+    with tab4:
+        st.header("Como as reclamações evoluem ao longo do tempo?")
+        df_complaints_time = st.session_state.get('df_complaints_with_topics')
+
+        if df_complaints_time is not None and not df_complaints_time.empty:
+            df_complaints_time['review_date'] = pd.to_datetime(df_complaints_time['review_date'])
+            
+            complaints_over_time = df_complaints_time.set_index('review_date').resample('M').size().reset_index(name='count')
+            complaints_over_time['review_date'] = complaints_over_time['review_date'].dt.strftime('%Y-%m')
+
+            fig = px.line(complaints_over_time, x='review_date', y='count', title='Total de Reclamações por Mês', markers=True,
+                          labels={'review_date': 'Mês', 'count': 'Número de Reclamações'})
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.subheader("Análise Temporal por Produto Específico")
+            top_product_list_time = df_complaints_time['asin'].value_counts().head(20).index.tolist()
+            selected_product_time = st.selectbox("Selecione um produto para ver sua evolução temporal:", top_product_list_time)
+
+            if selected_product_time:
+                product_df = df_complaints_time[df_complaints_time['asin'] == selected_product_time]
+                product_over_time = product_df.set_index('review_date').resample('M').size().reset_index(name='count')
+                product_over_time['review_date'] = product_over_time['review_date'].dt.strftime('%Y-%m')
+                
+                fig_product = px.line(product_over_time, x='review_date', y='count', 
+                                      title=f'Evolução das Reclamações para o Produto: {selected_product_time}', markers=True,
+                                      labels={'review_date': 'Mês', 'count': 'Número de Reclamações'})
+                st.plotly_chart(fig_product, use_container_width=True)
+
+        else:
+            st.info("Não há dados de reclamações para exibir a análise temporal.")

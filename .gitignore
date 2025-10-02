@@ -1,0 +1,3 @@
+# Ignorar arquivos de dados legados e muito grandes
+train.ft.txt.bz2
+test.ft.txt.bz2
