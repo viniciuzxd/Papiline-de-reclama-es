@@ -174,6 +174,7 @@ def run_topic_modeling_pipeline(df_spec, n_topics):
 # ==============================================================================
 # FUNÇÃO DO CHATBOT (OPCIONAL)
 # ==============================================================================
+
 def chatbot_answer(question, metrics, importances_df, topics):
     """Gera respostas para o chatbot com base nos resultados da análise."""
     q = (question or "").lower()
@@ -203,6 +204,7 @@ def chatbot_answer(question, metrics, importances_df, topics):
 # ==============================================================================
 # 5. INTERFACE DO STREAMLIT (UI)
 # ==============================================================================
+
 st.set_page_config(page_title="Análise de Sentimento", layout="wide")
 st.sidebar.title("Configurações da Análise")
 
