@@ -1,3 +1,6 @@
+# ==============================================================================
+# 1. IMPORTAÇÕES (Bloco completo e corrigido)
+# ==============================================================================
 import streamlit as st
 import pandas as pd
 import os
@@ -8,342 +11,332 @@ import sqlite3
 import plotly.express as px
 import re
 import nltk
+import bz2
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
 
-# --- IMPORTAÇÕES DO SCIKIT-LEARN QUE ESTAVAM FALTANDO ---
 from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.decomposition import LatentDirichletAllocation
-# ---------------------------------------------------------
 
-
-# --- Bloco de configuração do NLTK (executa uma vez) ---
-# É seguro deixar aqui, o Streamlit gerencia o cache.
+# --- Bloco de configuração do NLTK ---
 try:
     stopwords.words('english')
 except LookupError:
-    # Se der erro aqui, lembre-se de rodar o script setup_nltk.py primeiro
     nltk.download('punkt')
     nltk.download('wordnet')
     nltk.download('stopwords')
-# ---------------------------------------------------------
 
 # ==============================================================================
-# 0. CONFIGURAÇÕES GERAIS (Atualizado para sua estrutura)
+# 2. CONFIGURAÇÕES GERAIS (Adaptado para os arquivos .bz2)
 # ==============================================================================
-# ATENÇÃO: Adicione o arquivo 'Electronics.csv' baixado do Kaggle a esta pasta.
-# O código vai procurar por este nome. Os arquivos 'train.ft.txt.bz2' não serão mais usados.
-DATA_FILE_PATH = "Electronics.csv"
+# Usando o arquivo de treino que você baixou
+TRAIN_FILE_PATH = "train.ft.txt.bz2"
 
-# Um novo banco de dados será criado com este nome
-DB_NAME = "electronics_reviews_v2.db"
+DB_NAME = "sentiment_reviews.db"
 SOR_TABLE = "sor_reviews"
 SOT_TABLE = "sot_reviews"
 SPEC_TABLE_TRAIN = "spec_reviews_train"
 
-# Um novo diretório chamado 'model_complaint_v2' será criado para salvar o novo modelo,
-# para não confundir com sua pasta 'model_sentiment' antiga.
-MODEL_DIR = "model_complaint_v2"
+MODEL_DIR = "model_sentiment_v2"
 if not os.path.exists(MODEL_DIR): os.makedirs(MODEL_DIR)
-MODEL_PATH = os.path.join(MODEL_DIR, "complaint_classifier_v2.pickle")
+MODEL_PATH = os.path.join(MODEL_DIR, "sentiment_classifier_v2.pickle")
 
-# Configurações para Modelagem de Tópicos
-N_TOPICS = 5
-
-# ==============================================================================
-# 1. MÓDULO DE PRÉ-PROCESSAMENTO DE TEXTO
-# ==============================================================================
-def preprocess_text(text):
-    """Aplica uma limpeza completa no texto: minúsculas, remove pontuação/números,
-    remove stopwords e aplica lematização."""
-    if not isinstance(text, str):
-        return ""
-    
-    lemmatizer = WordNetLemmatizer()
-    stop_words = set(stopwords.words('english'))
-    
-    text = text.lower()
-    text = re.sub(r'[^a-z\s]', '', text)
-    tokens = word_tokenize(text)
-    
-    lemmatized_tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words and len(word) > 2]
-    
-    return " ".join(lemmatized_tokens)
+N_TOPICS = 5 # Número de tópicos para descobrir nas avaliações negativas
 
 # ==============================================================================
-# 2. MÓDULO DE BANCO DE DADOS
+# 3. MÓDULOS DE LEITURA E BANCO DE DADOS (Adaptados)
 # ==============================================================================
-def connect_db():
-    return sqlite3.connect(DB_NAME)
 
-def create_database_and_tables():
-    if os.path.exists(DB_NAME):
-        os.remove(DB_NAME)
-    
-    conn = connect_db()
-    cursor = conn.cursor()
-    cursor.execute(f"""
-        CREATE TABLE {SOR_TABLE} (
-            asin TEXT, 
-            overall INTEGER, 
-            reviewText TEXT,
-            reviewTime TEXT
-        )
-    """)
-    cursor.execute(f"""
-        CREATE TABLE {SOT_TABLE} (
-            asin TEXT, 
-            is_complaint INTEGER, 
-            text_processed TEXT,
-            review_date DATE
-        )
-    """)
-    cursor.execute(f"""
-        CREATE TABLE {SPEC_TABLE_TRAIN} (
-            asin TEXT, 
-            is_complaint INTEGER, 
-            text_processed TEXT,
-            review_date DATE
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def run_etl_pipeline(df_raw, progress_bar):
-    conn = connect_db()
-    df_raw.to_sql(SOR_TABLE, conn, if_exists="replace", index=False)
-    
-    df_sor = pd.read_sql_query(f"SELECT * FROM {SOR_TABLE}", conn)
-    
-    df_sot = pd.DataFrame()
-    df_sot['asin'] = df_sor['asin']
-    
-    progress_bar.progress(30, text="ETL: Aplicando pré-processamento avançado no texto...")
-    df_sot['text_processed'] = df_sor['reviewText'].apply(preprocess_text)
-    
-    df_sot['is_complaint'] = df_sor['overall'].apply(lambda x: 1 if x <= 2 else 0)
-    df_sot['review_date'] = pd.to_datetime(df_sor['reviewTime'])
-    
-    df_sot.to_sql(SOT_TABLE, conn, if_exists="replace", index=False)
-    
-    df_spec = pd.read_sql_query(f"SELECT * FROM {SOT_TABLE}", conn)
-    df_spec.to_sql(SPEC_TABLE_TRAIN, conn, if_exists="replace", index=False)
-    conn.close()
-
-def load_data_from_db(table_name: str):
-    conn = connect_db()
-    df = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
-    conn.close()
-    return df
-
-# ==============================================================================
-# 3. MÓDULO DE LEITURA DE ARQUIVO
-# ==============================================================================
 @st.cache_data
-def load_electronics_reviews_from_csv(file_path, sample_size=None):
+def load_reviews_from_bz2(file_path, sample_size=None):
+    """Função para ler os arquivos .bz2 com formato __label__X."""
     if not os.path.exists(file_path):
-        st.error(f"Arquivo não encontrado: '{file_path}'. Certifique-se de que 'Electronics.csv' está na pasta.")
+        st.error(f"Arquivo não encontrado: '{file_path}'. Certifique-se de que ele está na pasta do projeto.")
         return None
     
+    labels, texts = [], []
     with st.spinner(f"Carregando e processando '{file_path}'..."):
-        try:
-            # ATENÇÃO: Verifique se 'reviewTime' é o nome correto da coluna no seu CSV!
-            df = pd.read_csv(file_path, usecols=['asin', 'overall', 'reviewText', 'reviewTime'])
-            df.dropna(subset=['reviewText', 'asin', 'reviewTime'], inplace=True)
-            df = df[df['overall'] != 3]
-            
-            if sample_size and sample_size < len(df):
-                df = df.sample(n=sample_size, random_state=42)
+        with bz2.open(file_path, 'rt', encoding='utf-8') as file:
+            for line in file:
+                try:
+                    # O formato é: __label__X texto da avaliação
+                    space_index = line.find(' ')
+                    label = int(line[9:space_index]) # Pega o número depois de __label__
+                    text = line[space_index + 1:].strip()
+                    labels.append(label)
+                    texts.append(text)
+                except Exception:
+                    continue # Ignora linhas mal formatadas
+    
+    df = pd.DataFrame({'label': labels, 'text': texts})
 
-            st.success(f"Arquivo '{file_path}' carregado! {len(df)} linhas serão analisadas.")
-            return df
-        except Exception as e:
-            st.error(f"Erro ao ler o arquivo CSV: {e}. Verifique o nome das colunas.")
-            return None
+    if sample_size and sample_size < len(df):
+        df = df.sample(n=sample_size, random_state=42)
+
+    st.success(f"Arquivo '{file_path}' carregado! {len(df)} linhas serão analisadas.")
+    return df
+
+def preprocess_text(text):
+    """Função de limpeza de texto com lematização."""
+    if not isinstance(text, str): return ""
+    lemmatizer = WordNetLemmatizer()
+    stop_words = set(stopwords.words('english'))
+    text = text.lower()
+    text = re.sub(r'[^a-z\s]', '', text)
+    tokens = text.split()  # <-- ALTERAÇÃO FEITA AQUI
+    lemmatized_tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words and len(word) > 2]
+    return " ".join(lemmatized_tokens)
+
+def run_etl_pipeline(df_raw):
+    """Executa o pipeline de ETL: Raw -> SOR -> SOT -> SPEC."""
+    if os.path.exists(DB_NAME): os.remove(DB_NAME)
+    conn = sqlite3.connect(DB_NAME)
+
+    # SOR
+    df_raw.to_sql(SOR_TABLE, conn, if_exists="replace", index=False)
+
+    # SOT
+    df_sor = pd.read_sql_query(f"SELECT * FROM {SOR_TABLE}", conn)
+    df_sot = df_sor.copy()
+    df_sot['text_processed'] = df_sor['text'].apply(preprocess_text)
+    df_sot.to_sql(SOT_TABLE, conn, if_exists="replace", index=False)
+
+    # SPEC
+    df_spec = pd.read_sql_query(f"SELECT label, text_processed FROM {SOT_TABLE}", conn)
+    df_spec.to_sql(SPEC_TABLE_TRAIN, conn, if_exists="replace", index=False)
+    
+    conn.close()
 
 # ==============================================================================
-# 4. MÓDULO DO PIPELINE DE MACHINE LEARNING
+# 4. MÓDULOS DE MACHINE LEARNING
 # ==============================================================================
-def run_complaint_classifier_pipeline(df_spec, test_size_split):
-    y = df_spec["is_complaint"]
+
+def run_classification_pipeline(df_spec, test_size_split):
+    """Treina o classificador de sentimento (Positivo vs. Negativo)."""
+    df_spec['label'] = df_spec['label'].map({1: 'Negativo', 2: 'Positivo'})
+    
+    y = df_spec["label"]
     X = df_spec['text_processed']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_split, random_state=42, stratify=y)
     
-    nlp_pipeline = Pipeline([
-        ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english', ngram_range=(1, 2))),
+    pipeline = Pipeline([
+        ('tfidf', TfidfVectorizer(max_features=5000, stop_words='english')),
         ('clf', LogisticRegression(max_iter=1000, random_state=42))
     ])
-    nlp_pipeline.fit(X_train, y_train)
+    pipeline.fit(X_train, y_train)
+
+    y_pred = pipeline.predict(X_test)
+    metrics = {
+        "Acurácia": f"{accuracy_score(y_test, y_pred):.2%}",
+        "Relatório de Classificação": classification_report(y_test, y_pred, output_dict=True)
+    }
+
+    # Extrair importância das palavras
+    vectorizer = pipeline.named_steps['tfidf']
+    classifier = pipeline.named_steps['clf']
+    feature_names = vectorizer.get_feature_names_out()
+    coefs = classifier.coef_[0]
+    importances_df = pd.DataFrame({
+        'palavra': feature_names, 
+        'importancia': coefs
+    }).sort_values('importancia', ascending=False)
     
-    y_pred = nlp_pipeline.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred)
-    report = classification_report(y_test, y_pred, target_names=['Não Reclamação', 'Reclamação'], output_dict=True)
-    metrics = {"Acurácia": f"{accuracy:.2%}", "Relatório de Classificação": report}
+    with open(MODEL_PATH, "wb") as f:
+        pickle.dump(pipeline, f)
+        
+    return metrics, importances_df
 
-    with open(MODEL_PATH, "wb") as f: pickle.dump(nlp_pipeline, f)
-    return metrics
-
-def run_topic_modeling_pipeline(complaint_texts, n_topics):
-    vectorizer = TfidfVectorizer(max_df=0.95, min_df=2, max_features=1000, stop_words='english')
-    X = vectorizer.fit_transform(complaint_texts)
+def run_topic_modeling_pipeline(df_spec, n_topics):
+    """Executa a modelagem de tópicos nas avaliações negativas."""
+    negative_texts = df_spec[df_spec['label'] == 1]['text_processed']
+    if negative_texts.empty or len(negative_texts) < n_topics:
+        return None  
+    
+    vectorizer = TfidfVectorizer(max_df=0.9, min_df=5, max_features=1000, stop_words='english')
+    X = vectorizer.fit_transform(negative_texts)
     
     lda = LatentDirichletAllocation(n_components=n_topics, random_state=42)
     lda.fit(X)
     
     feature_names = vectorizer.get_feature_names_out()
     topics = {}
-    topic_names = {
-        0: "Bateria e Energia", 1: "Qualidade/Defeito do Produto", 2: "Conectividade e Software",
-        3: "Componentes (tela, cabo)", 4: "Uso Geral e Expectativa"
-    }
-    for topic_idx, topic in enumerate(lda.components_):
-        top_words = [feature_names[i] for i in topic.argsort()[:-10 - 1:-1]]
-        topic_name = topic_names.get(topic_idx, f"Motivo {topic_idx + 1}")
-        topics[topic_name] = ", ".join(top_words)
+    for topic_idx, topic_words in enumerate(lda.components_):
+        top_words = [feature_names[i] for i in topic_words.argsort()[:-8:-1]]
+        topics[f"Motivo Negativo {topic_idx + 1}"] = ", ".join(top_words)
         
-    topic_distribution = lda.transform(X)
-    dominant_topic_idx = np.argmax(topic_distribution, axis=1)
-    dominant_topic_name = [topic_names.get(i, f"Motivo {i+1}") for i in dominant_topic_idx]
-    
-    return topics, dominant_topic_name
+    return topics
 
 # ==============================================================================
-# 5. MÓDULO UI STREAMLIT
+# FUNÇÃO DO CHATBOT (OPCIONAL)
 # ==============================================================================
-st.set_page_config(page_title="Análise de Reclamações", layout="wide")
+def chatbot_answer(question, metrics, importances_df, topics):
+    """Gera respostas para o chatbot com base nos resultados da análise."""
+    q = (question or "").lower()
+
+    if "acurácia" in q or "desempenho" in q:
+        return f"A acurácia do modelo de classificação foi de {metrics.get('Acurácia', 'N/A')}."
+
+    if "positivas" in q:
+        top_positive = importances_df.head(5)["palavra"].tolist()
+        return f"As 5 palavras mais influentes para um sentimento POSITIVO são: {', '.join(top_positive)}."
+
+    if "negativas" in q:
+        top_negative = importances_df.tail(5).sort_values('importancia', ascending=True)["palavra"].tolist()
+        return f"As 5 palavras mais influentes para um sentimento NEGATIVO são: {', '.join(top_negative)}."
+
+    if "motivos" in q or "tópicos" in q or "causa" in q:
+        if topics:
+            # Pega o primeiro tópico como exemplo de resposta
+            main_topic_name = next(iter(topics.keys()))
+            main_topic_words = topics[main_topic_name]
+            return f"Um dos principais motivos para avaliações negativas é relacionado a '{main_topic_name}', com palavras-chave como: {main_topic_words}."
+        else:
+            return "A análise de tópicos não encontrou resultados claros na amostra atual para eu poder resumir."
+            
+    return "Não entendi a pergunta. Você pode me perguntar sobre 'acurácia', 'palavras positivas', 'palavras negativas' ou 'motivos das reclamações'."
+
+# ==============================================================================
+# 5. INTERFACE DO STREAMLIT (UI)
+# ==============================================================================
+st.set_page_config(page_title="Análise de Sentimento", layout="wide")
 st.sidebar.title("Configurações da Análise")
 
 with st.sidebar:
     st.header("1. Dados de Entrada")
-    st.info(f"O modelo usará o arquivo: `{DATA_FILE_PATH}`")
-    sample_size = st.slider("Nº de avaliações para analisar (amostra)", 5000, 100000, 20000, 5000)
+    st.info(f"O modelo usará o arquivo: `{TRAIN_FILE_PATH}`")
+    sample_size = st.slider("Nº de avaliações para analisar", 10000, 500000, 50000, 10000)
     
     st.header("2. Ações do Pipeline")
     test_size = st.slider("Tamanho do conjunto de validação (%)", 0.1, 0.4, 0.2, 0.05)
     
     if st.button("🚀 Executar Análise Completa"):
         st.session_state.clear()
-        df_raw = load_electronics_reviews_from_csv(DATA_FILE_PATH, sample_size)
+        df_raw = load_reviews_from_bz2(TRAIN_FILE_PATH, sample_size)
         
         if df_raw is not None:
             progress_bar = st.progress(0, text="Iniciando pipeline...")
             
-            progress_bar.progress(10, text="ETL: Criando banco de dados...")
-            create_database_and_tables()
-            time.sleep(1)
+            progress_bar.progress(25, text="ETL: Processando e movendo dados...")
+            run_etl_pipeline(df_raw)
             
-            run_etl_pipeline(df_raw, progress_bar)
-            
-            progress_bar.progress(40, text="Carregando dados da tabela SPEC...")
-            df_spec = load_data_from_db(SPEC_TABLE_TRAIN)
-            df_spec['review_date'] = pd.to_datetime(df_spec['review_date'])
-            st.session_state.df_spec = df_spec
+            conn = sqlite3.connect(DB_NAME)
+            df_spec = pd.read_sql(f"SELECT * FROM {SPEC_TABLE_TRAIN}", conn)
+            conn.close()
             
             progress_bar.progress(50, text="Treinando modelo de classificação...")
-            metrics = run_complaint_classifier_pipeline(df_spec, test_size)
-            st.session_state.classifier_metrics = metrics
+            metrics, importances = run_classification_pipeline(df_spec, test_size)
+            st.session_state.metrics = metrics
+            st.session_state.importances = importances
             
-            progress_bar.progress(75, text="Analisando os motivos das reclamações (LDA)...")
-            df_complaints = df_spec[df_spec['is_complaint'] == 1].copy()
-            if not df_complaints.empty:
-                topics, dominant_topic = run_topic_modeling_pipeline(df_complaints['text_processed'], N_TOPICS)
-                st.session_state.topics = topics
-                df_complaints['topic_name'] = dominant_topic
-                st.session_state.df_complaints_with_topics = df_complaints
-            
+            progress_bar.progress(75, text="Analisando os motivos das avaliações negativas...")
+            topics = run_topic_modeling_pipeline(df_spec, N_TOPICS)
+            st.session_state.topics = topics
+
             progress_bar.progress(100, text="Análise concluída!")
-            time.sleep(2)
-            progress_bar.empty()
             st.success("Pipeline executado com sucesso!")
+            st.balloons()
             st.rerun()
 
-st.title("🤖 Dashboard de Análise de Reclamações de Produtos Eletrônicos")
+st.title("🤖 Dashboard de Análise de Sentimento de Avaliações")
 
-if 'df_spec' not in st.session_state:
+if 'metrics' not in st.session_state:
     st.info("👈 Configure e execute a análise na barra lateral para ver os resultados.")
 else:
     tab1, tab2, tab3, tab4 = st.tabs([
-        "📊 Desempenho do Classificador", 
-        "🏆 Produtos com Mais Reclamações", 
-        "🔍 Análise de Motivos (O Porquê)",
-        "📈 Análise Temporal (NOVO!)"
+    "📊 Desempenho do Classificador", 
+    "🔍 Palavras Mais Influentes",
+    "📉 Motivos das Avaliações Negativas",
+    "💬 Chat com o Assistente"
     ])
 
     with tab1:
-        st.header("Métricas do Modelo de Classificação de Reclamações")
-        if 'classifier_metrics' in st.session_state:
-            metrics = st.session_state.classifier_metrics
-            st.metric("Acurácia", metrics["Acurácia"])
-            st.dataframe(pd.DataFrame(metrics["Relatório de Classificação"]).transpose())
-        else: st.warning("Métricas não disponíveis.")
+        st.header("Métricas do Modelo de Classificação")
+        st.metric("Acurácia", st.session_state.metrics["Acurácia"])
+        report_df = pd.DataFrame(st.session_state.metrics["Relatório de Classificação"]).transpose()
+        st.dataframe(report_df)
 
     with tab2:
-        st.header("Quais produtos recebem mais reclamações?")
-        if 'df_complaints_with_topics' in st.session_state:
-            df_complaints = st.session_state.df_complaints_with_topics
-            complaint_counts = df_complaints['asin'].value_counts().reset_index()
-            complaint_counts.columns = ['asin', 'count']
-            
-            top_n = st.slider("Selecione o número de produtos para exibir", 5, 50, 10, key='top_n_slider')
-            top_products = complaint_counts.head(top_n)
-
-            fig = px.bar(top_products, x='asin', y='count', title=f'Top {top_n} Produtos com Mais Reclamações', labels={'asin': 'ID do Produto (ASIN)', 'count': 'Número de Reclamações'})
-            fig.update_xaxes(type='category')
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.info("Não há dados de reclamações para exibir.")
+        st.header("Palavras que Mais Influenciam o Sentimento")
+        importances_df = st.session_state.importances
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Top 15 Palavras Positivas")
+            st.dataframe(importances_df.head(15))
+        with col2:
+            st.subheader("Top 15 Palavras Negativas")
+            st.dataframe(importances_df.tail(15).sort_values('importancia', ascending=True))
 
     with tab3:
-        st.header("Por que os clientes estão reclamando?")
-        if 'topics' in st.session_state and 'df_complaints_with_topics' in st.session_state:
-            topics = st.session_state.topics
-            df_complaints = st.session_state.df_complaints_with_topics
-
-            st.subheader("Principais Motivos de Reclamação (Geral)")
-            st.table(pd.DataFrame.from_dict(topics, orient='index', columns=['Palavras-chave']))
-            
-            st.subheader("Análise por Produto Específico")
-            top_product_list = df_complaints['asin'].value_counts().head(20).index.tolist()
-            selected_product = st.selectbox("Selecione um produto para analisar:", top_product_list)
-
-            if selected_product:
-                product_complaints = df_complaints[df_complaints['asin'] == selected_product]
-                topic_counts = product_complaints['topic_name'].value_counts().reset_index()
-                fig = px.pie(topic_counts, names='topic_name', values='count', title=f"Motivos de Reclamação para o Produto: {selected_product}", hole=0.3)
-                st.plotly_chart(fig, use_container_width=True)
-        else: st.info("Não há dados de tópicos para exibir.")
-
-    with tab4:
-        st.header("Como as reclamações evoluem ao longo do tempo?")
-        df_complaints_time = st.session_state.get('df_complaints_with_topics')
-
-        if df_complaints_time is not None and not df_complaints_time.empty:
-            df_complaints_time['review_date'] = pd.to_datetime(df_complaints_time['review_date'])
-            
-            complaints_over_time = df_complaints_time.set_index('review_date').resample('M').size().reset_index(name='count')
-            complaints_over_time['review_date'] = complaints_over_time['review_date'].dt.strftime('%Y-%m')
-
-            fig = px.line(complaints_over_time, x='review_date', y='count', title='Total de Reclamações por Mês', markers=True,
-                          labels={'review_date': 'Mês', 'count': 'Número de Reclamações'})
-            st.plotly_chart(fig, use_container_width=True)
-
-            st.subheader("Análise Temporal por Produto Específico")
-            top_product_list_time = df_complaints_time['asin'].value_counts().head(20).index.tolist()
-            selected_product_time = st.selectbox("Selecione um produto para ver sua evolução temporal:", top_product_list_time)
-
-            if selected_product_time:
-                product_df = df_complaints_time[df_complaints_time['asin'] == selected_product_time]
-                product_over_time = product_df.set_index('review_date').resample('M').size().reset_index(name='count')
-                product_over_time['review_date'] = product_over_time['review_date'].dt.strftime('%Y-%m')
-                
-                fig_product = px.line(product_over_time, x='review_date', y='count', 
-                                      title=f'Evolução das Reclamações para o Produto: {selected_product_time}', markers=True,
-                                      labels={'review_date': 'Mês', 'count': 'Número de Reclamações'})
-                st.plotly_chart(fig_product, use_container_width=True)
-
+        st.header("Análise de Tópicos nas Avaliações Negativas")
+        if st.session_state.topics:
+            topics_df = pd.DataFrame.from_dict(st.session_state.topics, orient='index', columns=['Principais Palavras-chave'])
+            st.table(topics_df)
+            st.info("Estes são os principais temas encontrados automaticamente nos textos com sentimento negativo.")
         else:
-            st.info("Não há dados de reclamações para exibir a análise temporal.")
+            st.warning("Não foi possível gerar os tópicos (pode haver poucas amostras negativas).")
+    # Bloco de código para a nova aba do Chatbot
+    with tab4:
+        st.header("Converse com o Assistente de Análise")
+        st.info("Faça perguntas em linguagem natural sobre os resultados do modelo.")
+
+        # Inicializa o histórico do chat
+        if "messages" not in st.session_state:
+            st.session_state.messages = [{"role": "assistant", "content": "Olá! O modelo foi treinado. Sobre o que você gostaria de saber?"}]
+
+        # Mostra as mensagens do histórico
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Input do usuário
+        if prompt := st.chat_input("Pergunte sobre acurácia, palavras, motivos...", key="chat_widget"):
+            # Adiciona a mensagem do usuário ao histórico e à tela
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Gera e mostra a resposta do assistente
+            with st.chat_message("assistant"):
+                response = chatbot_answer(
+                    prompt, 
+                    st.session_state.metrics, 
+                    st.session_state.importances, 
+                    st.session_state.topics
+                )
+                st.markdown(response)
+
+            # Adiciona a resposta do assistente ao histórico
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+        if "messages" not in st.session_state:
+            st.session_state.messages = [{"role": "assistant", "content": "Olá! O modelo foi treinado. Sobre o que você gostaria de saber?"}]
+
+        # Mostra as mensagens do histórico
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        # Input do usuário
+        if prompt := st.chat_input("Pergunte sobre acurácia, palavras, motivos..."):
+            # Adiciona a mensagem do usuário ao histórico e à tela
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            # Gera e mostra a resposta do assistente
+            with st.chat_message("assistant"):
+                response = chatbot_answer(
+                    prompt, 
+                    st.session_state.metrics, 
+                    st.session_state.importances, 
+                    st.session_state.topics
+                )
+                st.markdown(response)
+
+            # Adiciona a resposta do assistente ao histórico
+            st.session_state.messages.append({"role": "assistant", "content": response})
